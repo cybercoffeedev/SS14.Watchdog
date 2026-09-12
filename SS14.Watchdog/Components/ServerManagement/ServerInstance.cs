@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net.Http;
 using System.Security.Cryptography;
@@ -34,6 +35,7 @@ namespace SS14.Watchdog.Components.ServerManagement
         public string Key { get; }
         public string? Secret { get; private set; }
         public string? ApiToken => _instanceConfig.ApiToken;
+        public string? CurrentRevision => _currentRevision;
 
         public bool IsRunning => _runningServer != null;
 
@@ -366,6 +368,58 @@ namespace SS14.Watchdog.Components.ServerManagement
             await _commandQueue.Writer.WriteAsync(new CommandStop(stopCommand), cancel);
         }
 
+        /// <summary>
+        /// Reverts the server to a specified target version asynchronously.
+        /// </summary>
+        /// <param name="targetVersion">
+        /// The target version to which the server should revert.
+        /// If null, the server will determine the appropriate version to revert to.
+        /// </param>
+        /// <param name="immediate">
+        /// A flag indicating whether the revert should be performed immediately.
+        /// </param>
+        /// <param name="cancel">
+        /// An optional <see cref="CancellationToken"/> that can be used to signal the operation should be canceled.
+        /// </param>
+        /// <returns>
+        /// The resolved target version string, or null if the operation cannot be performed (e.g., if the update provider is invalid).
+        /// </returns>
+        public async Task<string?> DoRevertCommandAsync(string? targetVersion, bool immediate,
+            CancellationToken cancel = default)
+        {
+            if (_updateProvider is not UpdateProviderManifest manifestProvider)
+                return null;
+
+            var resolved = await manifestProvider.ResolveRevertTargetAsync(_currentRevision, targetVersion, cancel);
+            if (resolved == null)
+                return null;
+
+            await _commandQueue.Writer.WriteAsync(new CommandRevert(resolved, immediate), cancel);
+            return resolved;
+        }
+
+        /// <summary>
+        /// Retrieves a list of the most recent update versions asynchronously.
+        /// </summary>
+        /// <param name="count">
+        /// The maximum number of recent versions to retrieve. Defaults to 5.
+        /// </param>
+        /// <param name="cancel">
+        /// An optional <see cref="CancellationToken"/> that can be used to signal the operation should be canceled.
+        /// </param>
+        /// <returns>
+        /// A read-only list of <see cref="UpdateVersionInfo"/> objects representing recent update versions.
+        /// Returns null if the update provider is not available or valid.
+        /// </returns>
+        public async Task<IReadOnlyList<UpdateVersionInfo>?> GetRecentVersionsAsync(int count = 5,
+            CancellationToken cancel = default)
+        {
+            if (_updateProvider is not UpdateProviderManifest manifestProvider)
+                return null;
+
+            return await manifestProvider.GetRecentVersionsAsync(count, cancel);
+        }
+
         public async Task ForceShutdownServerAsync(CancellationToken cancel = default)
         {
             var proc = _runningServer;
@@ -402,7 +456,7 @@ namespace SS14.Watchdog.Components.ServerManagement
             ProcessExitStatus? status;
             try
             {
-                await proc.WaitForExitAsync(cancel);
+                await proc.WaitForExitAsync(waitCts.Token);
                 status = await proc.GetExitStatusAsync();
             }
             catch (OperationCanceledException)

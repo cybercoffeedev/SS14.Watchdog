@@ -1,0 +1,36 @@
+﻿name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to create release for'
+        required: true
+        type: string
+jobs:
+  release:
+    permissions: write-all
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6.0.1
+        with:
+          ref: ${{ github.event.inputs.tag }}
+      - name: Setup .NET Core
+        uses: actions/setup-dotnet@v5.1.0
+        with:
+          dotnet-version: 10.0.x
+      - name: Install dependencies
+        run: dotnet restore
+      - name: Publish
+        run: |
+          dotnet build --configuration Release --no-restore
+          dotnet publish --configuration Release --no-restore -o dist
+      - name: Test
+        run: dotnet test --no-restore --verbosity normal
+      - name: Zip release
+        run: |
+          cd dist
+          zip -r ../dist.zip .
+      - name: Create Release
+        run: gh release create "${{ github.event.inputs.tag }}" -t "${{ github.event.inputs.tag }}" dist.zip

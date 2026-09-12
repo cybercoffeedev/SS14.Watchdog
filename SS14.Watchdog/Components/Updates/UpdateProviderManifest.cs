@@ -17,6 +17,8 @@ using SS14.Watchdog.Utility;
 
 namespace SS14.Watchdog.Components.Updates
 {
+    public sealed record UpdateVersionInfo(string Version, DateTimeOffset Time);
+
     public sealed class UpdateProviderManifest : UpdateProvider
     {
         private const int DownloadTimeoutSeconds = 120;
@@ -69,10 +71,134 @@ namespace SS14.Watchdog.Components.Updates
                 return null;
             }
 
-            var versionInfo = manifest.Builds[maxVersion];
-
             _logger.LogTrace("New version is {NewVersion} from {OldVersion}", maxVersion, currentVersion ?? "<none>");
 
+            return await DownloadAndInstallAsync(maxVersion, manifest.Builds[maxVersion], binPath, cancel);
+        }
+
+        /// <summary>
+        /// Executes an update to the specified target version from the manifest.
+        /// </summary>
+        /// <param name="targetVersion">
+        /// The target version to update to. This must correspond to a valid version in the manifest.
+        /// </param>
+        /// <param name="binPath">
+        /// The path to the binary directory where the update files will be applied.
+        /// </param>
+        /// <param name="cancel">
+        /// An optional <see cref="CancellationToken"/> that can be used to signal the operation should be canceled.
+        /// </param>
+        /// <returns>
+        /// A string representing the updated revision if the update is successful; otherwise, null
+        /// if the update fails or the target version is not found in the manifest.
+        /// </returns>
+        public async Task<string?> RunUpdateToVersionAsync(
+            string targetVersion,
+            string binPath,
+            CancellationToken cancel = default)
+        {
+            var manifest = await FetchManifestInfoAsync(cancel);
+            if (manifest == null || !manifest.Builds.TryGetValue(targetVersion, out var versionInfo))
+            {
+                _logger.LogError("Requested revert target version {Version} not found in manifest", targetVersion);
+                return null;
+            }
+
+            return await DownloadAndInstallAsync(targetVersion, versionInfo, binPath, cancel);
+        }
+
+        /// <summary>
+        /// Resolves the target version to revert to based on the current version, an explicitly specified version,
+        /// and available versions in the manifest.
+        /// </summary>
+        /// <param name="currentVersion">
+        /// The current version of the application. This determines the starting point for identifying a prior version to revert to.
+        /// </param>
+        /// <param name="explicitVersion">
+        /// An explicitly specified version to revert to. If provided, this version will be validated against the manifest.
+        /// If it is valid, it will be returned; otherwise, null will be returned.
+        /// </param>
+        /// <param name="cancel">
+        /// An optional <see cref="CancellationToken"/> that can be used to signal the operation should be canceled.
+        /// </param>
+        /// <returns>
+        /// A string representing the resolved target version to revert to if successful; otherwise, null if no valid version
+        /// could be determined based on the provided criteria.
+        /// </returns>
+        public async Task<string?> ResolveRevertTargetAsync(
+            string? currentVersion,
+            string? explicitVersion,
+            CancellationToken cancel = default)
+        {
+            var manifest = await FetchManifestInfoAsync(cancel);
+            if (manifest == null)
+                return null;
+
+            if (explicitVersion != null)
+                return manifest.Builds.ContainsKey(explicitVersion) ? explicitVersion : null;
+
+            if (currentVersion == null || !manifest.Builds.TryGetValue(currentVersion, out var currentInfo))
+                return null;
+
+            return manifest.Builds
+                .Where(kv => kv.Value.Time < currentInfo.Time)
+                .OrderByDescending(kv => kv.Value.Time)
+                .Select(kv => kv.Key)
+                .FirstOrDefault();
+        }
+
+        /// <summary>
+        /// Retrieves a list of the most recent update versions from the manifest.
+        /// </summary>
+        /// <param name="count">
+        /// The maximum number of recent versions to retrieve.
+        /// </param>
+        /// <param name="cancel">
+        /// An optional <see cref="CancellationToken"/> that can be used to signal the operation should be canceled.
+        /// </param>
+        /// <returns>
+        /// A read-only list of <see cref="UpdateVersionInfo"/> representing the most recent versions sorted by date,
+        /// or an empty list if the manifest cannot be fetched or contains no versions.
+        /// </returns>
+        public async Task<IReadOnlyList<UpdateVersionInfo>> GetRecentVersionsAsync(
+            int count,
+            CancellationToken cancel = default)
+        {
+            var manifest = await FetchManifestInfoAsync(cancel);
+            if (manifest == null)
+                return Array.Empty<UpdateVersionInfo>();
+
+            return manifest.Builds
+                .OrderByDescending(kv => kv.Value.Time)
+                .Take(count)
+                .Select(kv => new UpdateVersionInfo(kv.Key, kv.Value.Time))
+                .ToList();
+        }
+
+        /// <summary>
+        /// Downloads the specified version of the server binary, verifies its integrity, and installs it to the target directory.
+        /// </summary>
+        /// <param name="version">
+        /// The version of the server to download and install.
+        /// </param>
+        /// <param name="versionInfo">
+        /// Metadata containing details about the server build for the specified version.
+        /// </param>
+        /// <param name="binPath">
+        /// The path to the binary directory where the downloaded and extracted files will be installed.
+        /// </param>
+        /// <param name="cancel">
+        /// An optional <see cref="CancellationToken"/> that can be used to signal the operation should be canceled.
+        /// </param>
+        /// <returns>
+        /// A string representing the installed version if the operation is successful; otherwise, null if the download or installation fails.
+        /// </returns>
+        private async Task<string?> DownloadAndInstallAsync(
+            string version,
+            VersionInfo versionInfo,
+            string binPath,
+            CancellationToken cancel)
+        {
             var rid = RidUtility.FindBestRid(versionInfo.Server.Keys);
 
             if (rid == null)
@@ -140,7 +266,7 @@ namespace SS14.Watchdog.Components.Updates
             tempFile.Seek(0, SeekOrigin.Begin);
             DoBuildExtract(tempFile, binPath);
 
-            return maxVersion;
+            return version;
         }
 
         private async Task<ManifestInfo?> FetchManifestInfoAsync(CancellationToken cancel)
